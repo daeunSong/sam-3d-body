@@ -4,12 +4,64 @@ import cv2
 from sam_3d_body.visualization.renderer import Renderer
 from sam_3d_body.visualization.skeleton_visualizer import SkeletonVisualizer
 from sam_3d_body.metadata.mhr70 import pose_info as mhr70_pose_info
+from PIL import Image, ImageDraw, ImageFont
 
 LIGHT_BLUE = (0.65098039, 0.74117647, 0.85882353)
+DEFAULT_FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 
 visualizer = SkeletonVisualizer(line_width=2, radius=5)
 visualizer.set_pose_meta(mhr70_pose_info)
 
+def _to_np(x):
+    """Helper to convert tensors to numpy."""
+    return x.detach().cpu().numpy() if hasattr(x, "detach") else np.asarray(x)
+
+def forward_cam_from_rot(rot_matrix: np.ndarray):
+    """
+    Get a camera-frame forward vector from a rotation matrix.
+    Assumes Body Local Forward is +Z [0,0,1].
+    """
+    R = _to_np(rot_matrix).astype(np.float32)
+    local_forward = np.array([0.0, 0.0, 1.0], dtype=np.float32)
+    f = R @ local_forward
+
+    return f
+
+def put_text_rect(
+    img_bgr: np.ndarray,
+    text: str,
+    org_xy: tuple[int, int],
+    font_path: str = DEFAULT_FONT_PATH,
+    font_size: int = 14,
+    color_bgr: tuple[int, int, int] = (0, 0, 0),
+):
+    """
+    Draw TTF text on a BGR(OpenCV) image using PIL.
+    """
+    try:
+        # Convert to RGB for PIL
+        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(img_rgb)
+        draw = ImageDraw.Draw(pil_img)
+        
+        try:
+            font = ImageFont.truetype(font_path, font_size)
+        except OSError:
+            # Fallback to default if path is wrong
+            font = ImageFont.load_default()
+
+        # PIL draws text at top-left of org_xy
+        draw.text(org_xy, text, font=font, fill=(color_bgr[2], color_bgr[1], color_bgr[0]))
+
+        # Convert back to BGR for OpenCV
+        out_rgb = np.array(pil_img)
+        out_bgr = cv2.cvtColor(out_rgb, cv2.COLOR_RGB2BGR)
+        return np.ascontiguousarray(out_bgr)
+    except Exception as e:
+        # Fallback to OpenCV font if PIL fails hard
+        print(f"Font Error: {e}")
+        cv2.putText(img_bgr, text, org_xy, cv2.FONT_HERSHEY_PLAIN, 1.0, color_bgr, 1, cv2.LINE_AA)
+        return np.ascontiguousarray(img_bgr)
 
 def visualize_sample(img_cv2, outputs, faces):
     img_keypoints = img_cv2.copy()
@@ -23,68 +75,16 @@ def visualize_sample(img_cv2, outputs, faces):
         )
         img1 = visualizer.draw_skeleton(img_keypoints.copy(), keypoints_2d)
 
-        img1 = cv2.rectangle(
-            img1,
-            (int(person_output["bbox"][0]), int(person_output["bbox"][1])),
-            (int(person_output["bbox"][2]), int(person_output["bbox"][3])),
-            (0, 255, 0),
-            2,
-        )
-
+        img1 = cv2.rectangle(img1,(int(person_output["bbox"][0]), int(person_output["bbox"][1])),(int(person_output["bbox"][2]), int(person_output["bbox"][3])),(0, 255, 0),2)
         if "lhand_bbox" in person_output:
-            img1 = cv2.rectangle(
-                img1,
-                (
-                    int(person_output["lhand_bbox"][0]),
-                    int(person_output["lhand_bbox"][1]),
-                ),
-                (
-                    int(person_output["lhand_bbox"][2]),
-                    int(person_output["lhand_bbox"][3]),
-                ),
-                (255, 0, 0),
-                2,
-            )
-
+            img1 = cv2.rectangle(img1,(int(person_output["lhand_bbox"][0]), int(person_output["lhand_bbox"][1])),(int(person_output["lhand_bbox"][2]), int(person_output["lhand_bbox"][3])),(255, 0, 0),2)
         if "rhand_bbox" in person_output:
-            img1 = cv2.rectangle(
-                img1,
-                (
-                    int(person_output["rhand_bbox"][0]),
-                    int(person_output["rhand_bbox"][1]),
-                ),
-                (
-                    int(person_output["rhand_bbox"][2]),
-                    int(person_output["rhand_bbox"][3]),
-                ),
-                (0, 0, 255),
-                2,
-            )
+            img1 = cv2.rectangle(img1,(int(person_output["rhand_bbox"][0]), int(person_output["rhand_bbox"][1])),(int(person_output["rhand_bbox"][2]), int(person_output["rhand_bbox"][3])),(0, 0, 255),2)
 
         renderer = Renderer(focal_length=person_output["focal_length"], faces=faces)
-        img2 = (
-            renderer(
-                person_output["pred_vertices"],
-                person_output["pred_cam_t"],
-                img_mesh.copy(),
-                mesh_base_color=LIGHT_BLUE,
-                scene_bg_color=(1, 1, 1),
-            )
-            * 255
-        )
-
+        img2 = (renderer(person_output["pred_vertices"], person_output["pred_cam_t"], img_mesh.copy(), mesh_base_color=LIGHT_BLUE, scene_bg_color=(1, 1, 1)) * 255)
         white_img = np.ones_like(img_cv2) * 255
-        img3 = (
-            renderer(
-                person_output["pred_vertices"],
-                person_output["pred_cam_t"],
-                white_img,
-                mesh_base_color=LIGHT_BLUE,
-                scene_bg_color=(1, 1, 1),
-                side_view=True,
-            )
-            * 255
-        )
+        img3 = (renderer(person_output["pred_vertices"], person_output["pred_cam_t"], white_img, mesh_base_color=LIGHT_BLUE, scene_bg_color=(1, 1, 1), side_view=True) * 255)
 
         cur_img = np.concatenate([img_cv2, img1, img2, img3], axis=1)
         rend_img.append(cur_img)
@@ -101,30 +101,20 @@ def render_topdown_positions(
     margin_px: int = 40,
     circle_px: int = 10,
     x_max_m: float = 20.5,         # FIXED forward range
+    font_path: str = DEFAULT_FONT_PATH,
 ):
     panel = np.ones((H, W, 3), dtype=np.uint8) * 255
     ox, oy = W // 2, H - 1  # origin
 
-    # -------- collect positions (robot_x, robot_y) ----------
-    positions = []
-    for o in outputs_sorted:
-        t = np.asarray(o["pred_cam_t"], dtype=np.float32).reshape(-1)
-        robot_x = float(t[2])       # forward
-        robot_y = float(-t[0])      # left  (flip sign if needed)
-        positions.append((robot_x, robot_y))
-
     # -------- choose scale ----------
     if meters_per_px is None:
-        # FIX scale so that x_max_m always fits in height
         usable_h = max(1, H - 2 * margin_px)
         px_per_m = usable_h / float(x_max_m)
     else:
         px_per_m = 1.0 / float(meters_per_px)
 
-    # visible lateral range implied by width at this scale
     y_max_m = max(0.0, (ox - margin_px) / px_per_m)
 
-    # helper: meters -> pixel
     def m_to_px(x_m, y_m):
         u = int(round(ox - y_m * px_per_m))  # +y left => u decreases
         v = int(round(oy - x_m * px_per_m))  # +x forward => v decreases
@@ -134,8 +124,9 @@ def render_topdown_positions(
     normal = (220, 220, 220)
     bold = (180, 180, 180)
     axis = (0, 0, 0)
+    text_color = (120, 120, 120)
 
-    # Draw y-grid (lines of constant y, across x in [0, x_max_m])
+    # Draw y-grid (lines of constant y)
     y = -int(y_max_m // grid_step_m) * grid_step_m
     while y <= y_max_m + 1e-6:
         u0, v0 = m_to_px(0.0, y)
@@ -144,11 +135,10 @@ def render_topdown_positions(
         cv2.line(panel, (u0, v0), (u1, v1), bold if is_bold else normal, 2 if is_bold else 1)
 
         if abs(y) > 1e-6 and is_bold:
-            cv2.putText(panel, f"{y:.0f}m", (u0 + 5, min(H - 10, v0 - 5)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (120, 120, 120), 1, cv2.LINE_AA)
+            panel = put_text_rect(panel, f"{y:.0f}m", (u0 + 5, min(H - 10, v0 - 15)), font_path=font_path, font_size=16, color_bgr=text_color)
         y += grid_step_m
 
-    # Draw x-grid (lines of constant x, across y in [-y_max_m, y_max_m])
+    # Draw x-grid (lines of constant x)
     x = 0.0
     while x <= x_max_m + 1e-6:
         u0, v0 = m_to_px(x, -y_max_m)
@@ -157,8 +147,7 @@ def render_topdown_positions(
         cv2.line(panel, (u0, v0), (u1, v1), bold if is_bold else normal, 2 if is_bold else 1)
 
         if x > 0 and is_bold:
-            cv2.putText(panel, f"{x:.0f}m", (max(5, u0 - 60), v0 + 20),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (120, 120, 120), 1, cv2.LINE_AA)
+            panel = put_text_rect(panel, f"{x:.0f}m", (max(5, u0 - 50), v0 + 5), font_path=font_path, font_size=16, color_bgr=text_color)
         x += grid_step_m
 
     # -------- draw axes ----------
@@ -167,14 +156,12 @@ def render_topdown_positions(
     # +x axis (forward)
     u1, v1 = m_to_px(min(3.0, x_max_m), 0.0)
     cv2.arrowedLine(panel, (u0, v0), (u1, v1), axis, 2, tipLength=0.2)
-    cv2.putText(panel, "+x", (u1 + 10, max(20, v1 + 10)),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, axis, 2, cv2.LINE_AA)
+    panel = put_text_rect(panel, "+x", (u1 + 10, max(20, v1 + 5)), font_path=font_path, font_size=18, color_bgr=axis)
 
     # +y axis (left)
     u1, v1 = m_to_px(0.0, min(3.0, y_max_m))
     cv2.arrowedLine(panel, (u0, v0), (u1, v1), axis, 2, tipLength=0.2)
-    cv2.putText(panel, "+y", (max(10, u1 + 10), oy - 10),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, axis, 2, cv2.LINE_AA)
+    panel = put_text_rect(panel, "+y", (max(10, u1 + 10), oy - 20), font_path=font_path, font_size=18, color_bgr=axis)
 
     cv2.circle(panel, (ox, oy), 6, axis, -1)
 
@@ -184,12 +171,15 @@ def render_topdown_positions(
         if oy - r_px < margin_px:
             break
         cv2.circle(panel, (ox, oy), r_px, (210, 210, 210), 1)
-        cv2.putText(panel, f"{r}m", (ox + 6, oy - r_px - 6),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (140, 140, 140), 1, cv2.LINE_AA)
+        panel = put_text_rect(panel, f"{r}m", (ox + 6, oy - r_px - 15), font_path=font_path, font_size=14, color_bgr=(140, 140, 140))
 
-    # -------- humans ----------
-    for pid, (robot_x, robot_y) in enumerate(positions):
-        # optionally clamp to view window
+    # -------- humans with ARROWS ----------
+    for pid, o in enumerate(outputs_sorted):
+        # 1. Position Extraction
+        t = np.asarray(o["pred_cam_t"], dtype=np.float32).reshape(-1)
+        robot_x = float(t[2])       # forward (Cam Z)
+        robot_y = float(-t[0])      # left (Cam -X)
+
         if robot_x < 0 or robot_x > x_max_m:
             continue
         if abs(robot_y) > y_max_m:
@@ -198,20 +188,39 @@ def render_topdown_positions(
         u, v = m_to_px(robot_x, robot_y)
         if not (0 <= u < W and 0 <= v < H):
             continue
+
+        # 2. Rotation Extraction
+        rot_matrix = None
+        if "pred_global_rots" in o:
+            rots = o["pred_global_rots"]
+            if len(rots.shape) == 4: rot_matrix = rots[0][1] # Batch 0, Joint 1 (Root)
+            elif len(rots.shape) == 3: rot_matrix = rots[1]
+
+
+        # 3. Draw Arrow
+        if rot_matrix is not None:
+            f_cam = forward_cam_from_rot(rot_matrix)
+            
+            # Map Camera Vector to Top-Down Pixel Vector
+            dir_u = float(f_cam[0]) # Camera +X (Right) -> Pixel +U (Right)
+            dir_v = -float(f_cam[2]) # Camera +Z (Forward) -> Pixel V (Down)
+
+            norm = (dir_u**2 + dir_v**2)**0.5 + 1e-8
+            if norm > 0.01:
+                dir_u /= norm
+                dir_v /= norm
+                arrow_len_px = 30
+                u_tip = int(u + dir_u * arrow_len_px)
+                v_tip = int(v - dir_v * arrow_len_px) 
+                cv2.arrowedLine(panel, (u, v), (u_tip, v_tip), (0, 0, 0), 2, tipLength=0.3)
+
         cv2.circle(panel, (u, v), circle_px, (0, 0, 255), -1)
         cv2.circle(panel, (u, v), circle_px, (0, 0, 0), 2)
-        cv2.putText(panel, f"{pid}", (u + circle_px + 2, v - circle_px - 2),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 0), 2, cv2.LINE_AA)
-
-    # title (no scale text)
-    # cv2.putText(panel, "Top-down human positions (robot frame)", (10, 30),
-    #             cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 0), 2, cv2.LINE_AA)
+        panel = put_text_rect(panel, f"{pid}", (u + circle_px + 3, v - circle_px - 20), font_path=font_path, font_size=22, color_bgr=(0, 0, 0))
 
     return panel
 
-
 def visualize_sample_together(img_cv2, outputs, faces):
-    # Render everything together
     img_keypoints = img_cv2.copy()
     img_mesh = img_cv2.copy()
 
@@ -220,19 +229,14 @@ def visualize_sample_together(img_cv2, outputs, faces):
         cur_img = np.concatenate([img_cv2, img_keypoints, img_mesh, img_topdown], axis=1)
         return cur_img
 
-    # First, sort by depth, furthest to closest
     all_depths = np.stack([tmp['pred_cam_t'] for tmp in outputs], axis=0)[:, 2]
     outputs_sorted = [outputs[idx] for idx in np.argsort(-all_depths)]
 
-    # Then, draw all keypoints.
     for pid, person_output in enumerate(outputs_sorted):
         keypoints_2d = person_output["pred_keypoints_2d"]
-        keypoints_2d = np.concatenate(
-            [keypoints_2d, np.ones((keypoints_2d.shape[0], 1))], axis=-1
-        )
+        keypoints_2d = np.concatenate([keypoints_2d, np.ones((keypoints_2d.shape[0], 1))], axis=-1)
         img_keypoints = visualizer.draw_skeleton(img_keypoints, keypoints_2d)
 
-    # Then, put all meshes together as one super mesh
     all_pred_vertices = []
     all_faces = []
     for pid, person_output in enumerate(outputs_sorted):
@@ -241,41 +245,14 @@ def visualize_sample_together(img_cv2, outputs, faces):
     all_pred_vertices = np.concatenate(all_pred_vertices, axis=0)
     all_faces = np.concatenate(all_faces, axis=0)
 
-    # Pull out a fake translation; take the closest two
     fake_pred_cam_t = (np.max(all_pred_vertices[-2*18439:], axis=0) + np.min(all_pred_vertices[-2*18439:], axis=0)) / 2
     all_pred_vertices = all_pred_vertices - fake_pred_cam_t
     
-    # Render front view
     renderer = Renderer(focal_length=person_output["focal_length"], faces=all_faces)
-    img_mesh = (
-        renderer(
-            all_pred_vertices,
-            fake_pred_cam_t,
-            img_mesh,
-            mesh_base_color=LIGHT_BLUE,
-            scene_bg_color=(1, 1, 1),
-        )
-        * 255
-    )
+    img_mesh = (renderer(all_pred_vertices, fake_pred_cam_t, img_mesh, mesh_base_color=LIGHT_BLUE, scene_bg_color=(1, 1, 1)) * 255)
 
-    # # Render side view
-    # white_img = np.ones_like(img_cv2) * 255
-    # img_mesh_side = (
-    #     renderer(
-    #         all_pred_vertices,
-    #         fake_pred_cam_t,
-    #         white_img,
-    #         mesh_base_color=LIGHT_BLUE,
-    #         scene_bg_color=(1, 1, 1),
-    #         side_view=True,
-    #     )
-    #     * 255
-    # )
-
-    # NEW: render top-down 2D positions instead of side view
     img_topdown = render_topdown_positions(outputs_sorted, img_cv2.shape[0], img_cv2.shape[1])
 
-    # cur_img = np.concatenate([img_cv2, img_keypoints, img_mesh, img_mesh_side], axis=1)
     cur_img = np.concatenate([img_cv2, img_keypoints, img_mesh, img_topdown], axis=1)
 
     return cur_img
