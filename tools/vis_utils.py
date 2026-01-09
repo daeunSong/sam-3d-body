@@ -6,26 +6,13 @@ from sam_3d_body.visualization.skeleton_visualizer import SkeletonVisualizer
 from sam_3d_body.metadata.mhr70 import pose_info as mhr70_pose_info
 from PIL import Image, ImageDraw, ImageFont
 
+from tools.save_utils import get_human_state
+
 LIGHT_BLUE = (0.65098039, 0.74117647, 0.85882353)
 DEFAULT_FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"
 
 visualizer = SkeletonVisualizer(line_width=2, radius=5)
 visualizer.set_pose_meta(mhr70_pose_info)
-
-def _to_np(x):
-    """Helper to convert tensors to numpy."""
-    return x.detach().cpu().numpy() if hasattr(x, "detach") else np.asarray(x)
-
-def forward_cam_from_rot(rot_matrix: np.ndarray):
-    """
-    Get a camera-frame forward vector from a rotation matrix.
-    Assumes Body Local Forward is +Z [0,0,1].
-    """
-    R = _to_np(rot_matrix).astype(np.float32)
-    local_forward = np.array([0.0, 0.0, 1.0], dtype=np.float32)
-    f = R @ local_forward
-
-    return f
 
 def put_text_rect(
     img_bgr: np.ndarray,
@@ -173,52 +160,43 @@ def render_topdown_positions(
         cv2.circle(panel, (ox, oy), r_px, (210, 210, 210), 1)
         panel = put_text_rect(panel, f"{r}m", (ox + 6, oy - r_px - 15), font_path=font_path, font_size=14, color_bgr=(140, 140, 140))
 
-    # -------- humans with ARROWS ----------
+    # --- Humans ---    
     for pid, o in enumerate(outputs_sorted):
-        # 1. Position Extraction
-        t = np.asarray(o["pred_cam_t"], dtype=np.float32).reshape(-1)
-        robot_x = float(t[2])       # forward (Cam Z)
-        robot_y = float(-t[0])      # left (Cam -X)
+        # 1. Get Physics Data (Robot Frame)
+        pos_robot, facing_robot = get_human_state(o)
+        
+        rx, ry = pos_robot[0], pos_robot[1]
 
-        if robot_x < 0 or robot_x > x_max_m:
-            continue
-        if abs(robot_y) > y_max_m:
-            continue
+        # 2. Filter
+        if rx < 0 or rx > x_max_m: continue
+        if abs(ry) > y_max_m: continue
+        
+        # 3. Convert Position to Pixels
+        u, v = m_to_px(rx, ry)
+        if not (0 <= u < W and 0 <= v < H): continue
 
-        u, v = m_to_px(robot_x, robot_y)
-        if not (0 <= u < W and 0 <= v < H):
-            continue
-
-        # 2. Rotation Extraction
-        rot_matrix = None
-        if "pred_global_rots" in o:
-            rots = o["pred_global_rots"]
-            if len(rots.shape) == 4: rot_matrix = rots[0][1] # Batch 0, Joint 1 (Root)
-            elif len(rots.shape) == 3: rot_matrix = rots[1]
-
-
-        # 3. Draw Arrow
-        if rot_matrix is not None:
-            f_cam = forward_cam_from_rot(rot_matrix)
+        # 4. Draw Arrow (Convert Rotation to Pixels)
+        if facing_robot is not None:
+            # facing_robot = [fwd, left]
+            # Forward (+X) -> Moves Up (-v)
+            # Left (+Y)    -> Moves Left (-u)
             
-            # Map Camera Vector to Top-Down Pixel Vector
-            dir_u = float(f_cam[0]) # Camera +X (Right) -> Pixel +U (Right)
-            dir_v = -float(f_cam[2]) # Camera +Z (Forward) -> Pixel V (Down)
-
-            norm = (dir_u**2 + dir_v**2)**0.5 + 1e-8
-            if norm > 0.01:
-                dir_u /= norm
-                dir_v /= norm
-                arrow_len_px = 30
-                u_tip = int(u + dir_u * arrow_len_px)
-                v_tip = int(v - dir_v * arrow_len_px) 
-                cv2.arrowedLine(panel, (u, v), (u_tip, v_tip), (0, 0, 0), 2, tipLength=0.3)
+            fwd_comp = facing_robot[0]
+            left_comp = facing_robot[1]
+            
+            arrow_len_px = 30
+            
+            u_tip = int(u - left_comp * arrow_len_px) # Left means subtract u
+            v_tip = int(v - fwd_comp * arrow_len_px)  # Forward means subtract v
+            
+            cv2.arrowedLine(panel, (u, v), (u_tip, v_tip), (0, 0, 0), 2, tipLength=0.3)
 
         cv2.circle(panel, (u, v), circle_px, (0, 0, 255), -1)
         cv2.circle(panel, (u, v), circle_px, (0, 0, 0), 2)
-        panel = put_text_rect(panel, f"{pid}", (u + circle_px + 3, v - circle_px - 20), font_path=font_path, font_size=22, color_bgr=(0, 0, 0))
+        panel = put_text_rect(panel, f"{pid}", (u + circle_px + 3, v - circle_px - 20), font_path, 22, (0, 0, 0))
 
     return panel
+
 
 def visualize_sample_together(img_cv2, outputs, faces):
     img_keypoints = img_cv2.copy()
@@ -230,7 +208,7 @@ def visualize_sample_together(img_cv2, outputs, faces):
         return cur_img
 
     all_depths = np.stack([tmp['pred_cam_t'] for tmp in outputs], axis=0)[:, 2]
-    outputs_sorted = [outputs[idx] for idx in np.argsort(-all_depths)]
+    outputs_sorted = [outputs[idx] for idx in np.argsort(all_depths)]
 
     for pid, person_output in enumerate(outputs_sorted):
         keypoints_2d = person_output["pred_keypoints_2d"]
