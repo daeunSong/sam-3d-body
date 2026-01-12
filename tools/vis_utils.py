@@ -89,6 +89,7 @@ def render_topdown_positions(
     circle_px: int = 10,
     x_max_m: float = 20.5,         # FIXED forward range
     font_path: str = DEFAULT_FONT_PATH,
+    T_cam_base: np.ndarray = None,
 ):
     panel = np.ones((H, W, 3), dtype=np.uint8) * 255
     ox, oy = W // 2, H - 1  # origin
@@ -163,7 +164,7 @@ def render_topdown_positions(
     # --- Humans ---    
     for pid, o in enumerate(outputs_sorted):
         # 1. Get Physics Data (Robot Frame)
-        pos_robot, facing_robot = get_human_state(o)
+        pos_robot, facing_robot = get_human_state(o, T_cam_base)
         
         rx, ry = pos_robot[0], pos_robot[1]
 
@@ -198,12 +199,12 @@ def render_topdown_positions(
     return panel
 
 
-def visualize_sample_together(img_cv2, outputs, faces):
+def visualize_sample_together(img_cv2, outputs, faces, T_cam_base):
     img_keypoints = img_cv2.copy()
     img_mesh = img_cv2.copy()
 
     if not outputs:
-        img_topdown = render_topdown_positions([], img_cv2.shape[0], img_cv2.shape[1])
+        img_topdown = render_topdown_positions([], img_cv2.shape[0], img_cv2.shape[1], T_cam_base=T_cam_base)
         cur_img = np.concatenate([img_cv2, img_keypoints, img_mesh, img_topdown], axis=1)
         return cur_img
 
@@ -229,8 +230,23 @@ def visualize_sample_together(img_cv2, outputs, faces):
     renderer = Renderer(focal_length=person_output["focal_length"], faces=all_faces)
     img_mesh = (renderer(all_pred_vertices, fake_pred_cam_t, img_mesh, mesh_base_color=LIGHT_BLUE, scene_bg_color=(1, 1, 1)) * 255)
 
-    img_topdown = render_topdown_positions(outputs_sorted, img_cv2.shape[0], img_cv2.shape[1])
+    img_topdown = render_topdown_positions(outputs_sorted, img_cv2.shape[0], img_cv2.shape[1], T_cam_base=T_cam_base)
 
+    # # Render side view
+    # white_img = np.ones_like(img_cv2) * 255
+    # img_mesh_side = (
+    #     renderer(
+    #         all_pred_vertices,
+    #         fake_pred_cam_t,
+    #         white_img,
+    #         mesh_base_color=LIGHT_BLUE,
+    #         scene_bg_color=(1, 1, 1),
+    #         side_view=True,
+    #     )
+    #     * 255
+    # )
+
+    # cur_img = np.concatenate([img_cv2, img_keypoints, img_mesh, img_mesh_side], axis=1)
     cur_img = np.concatenate([img_cv2, img_keypoints, img_mesh, img_topdown], axis=1)
 
     return cur_img
