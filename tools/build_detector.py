@@ -35,15 +35,17 @@ class HumanDetector:
         # switch bgr to rgb 
         img = img[:, :, ::-1].copy()
         img = Image.fromarray(img.astype('uint8'), 'RGB')
-        inference_state = self.processor.set_image(img)
-        # Prompt the model with text
-        output = self.processor.set_text_prompt(state=inference_state, prompt="person")
+        # SAM 3.1 runs its fused kernels in bfloat16 and expects inference under bf16 autocast
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=torch.cuda.is_available()):
+            inference_state = self.processor.set_image(img)
+            # Prompt the model with text
+            output = self.processor.set_text_prompt(state=inference_state, prompt="person")
 
         # Get the masks, bounding boxes, and scores
         masks, boxes, scores = output["masks"], output["boxes"], output["scores"]
         
         confident_idx = scores > bbox_thr
-        boxes = boxes[confident_idx].cpu().numpy()
+        boxes = boxes[confident_idx].float().cpu().numpy()
         
         # resize the box with a scale factor 1.2
         scale = 1.2
